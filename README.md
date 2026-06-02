@@ -10,6 +10,22 @@ DuneDrop is a Windows 11 x64 desktop GUI for [`yt-dlp`](https://github.com/yt-dl
 - MP3 extraction requires `ffmpeg.exe` and `ffprobe.exe` on `PATH` or in the configured ffmpeg folder. They are intentionally not bundled.
 - Ordinary settings are persisted locally. Passwords, two-factor values, and raw argument text are not persisted.
 
+## Install FFmpeg for MP3 downloads
+
+`ffprobe.exe` is included with FFmpeg. To install the latest stable Windows essentials build for the current user, close DuneDrop and run:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\scripts\Install-FFmpeg.ps1
+```
+
+The script downloads the stable release from [gyan.dev](https://www.gyan.dev/ffmpeg/builds/), installs `ffmpeg.exe` and `ffprobe.exe` under `%LOCALAPPDATA%\FFmpeg`, adds that folder to the user `PATH`, and prints both installed versions.
+
+In DuneDrop, open Settings and select this ffmpeg folder if automatic detection has not refreshed yet:
+
+```text
+%LOCALAPPDATA%\FFmpeg
+```
+
 ## Prerequisites
 
 - Windows 11 x64
