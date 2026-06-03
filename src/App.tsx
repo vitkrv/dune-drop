@@ -153,7 +153,7 @@ export default function App() {
     (item: QueueItem): DownloadRequest => ({
       jobId: item.id,
       urls: [item.url],
-      destination: settings.destination,
+      destination: item.destination || settings.destination,
       preset: item.preset,
       ffmpegDirectory: settings.ffmpegDirectory || undefined,
       advancedArgs: selectedArgs,
@@ -167,7 +167,7 @@ export default function App() {
     if (runningId) return;
     const next = queue.find((item) => item.status === "pending");
     if (!next) return;
-    if (!settings.destination) {
+    if (!next.destination) {
       setNotice(t("missingDestination"));
       return;
     }
@@ -179,14 +179,14 @@ export default function App() {
         items.map((item) => (item.id === next.id ? { ...item, status: "failed", error: String(error) } : item)),
       );
     });
-  }, [queue, requestFor, runningId, settings.destination, t]);
+  }, [queue, requestFor, runningId, t]);
 
   useEffect(() => {
-    const sample: QueueItem = { id: "preview", url: "URL", preset, status: "pending" };
+    const sample: QueueItem = { id: "preview", url: "URL", destination: settings.destination, preset, status: "pending" };
     void invoke<string[]>("preview_download_args", { request: requestFor(sample) })
       .then(setPreview)
       .catch(() => setPreview([]));
-  }, [preset, requestFor]);
+  }, [preset, requestFor, settings.destination]);
 
   function updateSettings(patch: Partial<AppSettings>) {
     setSettings((current) => ({ ...current, ...patch }));
@@ -209,7 +209,13 @@ export default function App() {
     if (preset === "mp3" && !toolInfo?.ffmpegAvailable) return setNotice(t("ffmpegNeeded"));
     setQueue((items) => [
       ...items,
-      ...submittedUrls.map((url): QueueItem => ({ id: makeId(), url, preset, status: "pending" })),
+      ...submittedUrls.map((url): QueueItem => ({
+        id: makeId(),
+        url,
+        destination: settings.destination,
+        preset,
+        status: "pending",
+      })),
     ]);
     setUrls("");
     setNotice("");
@@ -226,6 +232,14 @@ export default function App() {
 
   function removeItem(id: string) {
     setQueue((items) => items.filter((item) => item.id !== id || item.status === "running"));
+  }
+
+  async function revealItemFolder(item: QueueItem) {
+    try {
+      await invoke("reveal_download_folder", { path: item.destination });
+    } catch (error) {
+      setNotice(String(error));
+    }
   }
 
   function toggleAdvanced(option: CatalogOption) {
@@ -309,7 +323,7 @@ export default function App() {
           <img className="brand-mark" src="/dunedrop-icon.png" alt="" />
           <div>
             <strong>DuneDrop</strong>
-            <span>yt-dlp desktop</span>
+            <span>Media downloader</span>
           </div>
         </div>
         <nav>
@@ -428,6 +442,11 @@ export default function App() {
                       </small>
                     </div>
                     <div className="queue-actions">
+                      {item.status === "completed" && (
+                        <button onClick={() => void revealItemFolder(item)} title={t("openFolder")}>
+                          <FolderOpen size={15} />
+                        </button>
+                      )}
                       {["failed", "cancelled"].includes(item.status) && (
                         <button onClick={() => retry(item)} title={t("retry")}>
                           <RotateCcw size={15} />

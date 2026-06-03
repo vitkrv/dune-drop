@@ -601,6 +601,26 @@ fn reveal_tools_folder(app: AppHandle) -> Result<(), String> {
 }
 
 #[tauri::command]
+fn reveal_download_folder(path: String) -> Result<(), String> {
+    let path = PathBuf::from(path);
+    let folder = if path.is_file() {
+        path.parent()
+            .ok_or("Downloaded item path has no containing folder")?
+            .to_path_buf()
+    } else {
+        path
+    };
+    if !folder.is_dir() {
+        return Err("Download folder does not exist".into());
+    }
+    std::process::Command::new("explorer.exe")
+        .arg(folder)
+        .spawn()
+        .map(|_| ())
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
 fn write_log_file(path: String, contents: String) -> Result<(), String> {
     fs::write(path, contents).map_err(|error| error.to_string())
 }
@@ -678,6 +698,7 @@ pub fn run() {
             start_download,
             cancel_download,
             reveal_tools_folder,
+            reveal_download_folder,
             write_log_file,
             replace_ytdlp,
             update_ytdlp,

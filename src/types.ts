@@ -41,6 +41,7 @@ export interface AppSettings {
 export interface QueueItem {
   id: string;
   url: string;
+  destination: string;
   preset: Preset;
   status: QueueStatus;
   error?: string;
@@ -76,4 +77,3 @@ export interface UtilityResponse {
   stderr: string;
   success: boolean;
 }
-
