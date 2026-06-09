@@ -1,6 +1,6 @@
 [package]
 name = "dunedrop"
-version = "0.1.0"
+version = "1.0.0"
 description = "DuneDrop desktop GUI for yt-dlp"
 authors = ["DuneDrop contributors"]
 edition = "2021"

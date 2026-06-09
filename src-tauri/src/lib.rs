@@ -96,6 +96,8 @@ struct DownloadDoneEvent {
     exit_code: Option<i32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     error: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    saved_paths: Option<Vec<String>>,
 }
 
 #[derive(Serialize)]
@@ -483,6 +485,51 @@ fn build_download_args(request: &DownloadRequest) -> Result<Vec<String>, String>
     Ok(args)
 }
 
+fn saved_paths_output_path(job_id: &str) -> PathBuf {
+    let safe_job_id = job_id
+        .chars()
+        .map(|character| {
+            if character.is_ascii_alphanumeric() || character == '-' || character == '_' {
+                character
+            } else {
+                '_'
+            }
+        })
+        .collect::<String>();
+    env::temp_dir().join(format!("dunedrop-saved-paths-{safe_job_id}.txt"))
+}
+
+fn add_saved_paths_output(args: &mut Vec<String>, output_path: &Path) -> Result<(), String> {
+    let separator = args
+        .iter()
+        .position(|arg| arg == "--")
+        .ok_or("Download arguments are missing the URL separator")?;
+    args.splice(
+        separator..separator,
+        [
+            "--print-to-file".to_owned(),
+            "after_move:filepath".to_owned(),
+            output_path.to_string_lossy().into_owned(),
+        ],
+    );
+    Ok(())
+}
+
+fn read_saved_paths(output_path: &Path) -> Option<Vec<String>> {
+    let contents = fs::read_to_string(output_path).ok()?;
+    let paths = contents
+        .lines()
+        .map(str::trim)
+        .filter(|path| !path.is_empty())
+        .map(ToOwned::to_owned)
+        .collect::<Vec<_>>();
+    if paths.is_empty() {
+        None
+    } else {
+        Some(paths)
+    }
+}
+
 async fn stream_output<R: AsyncRead + Unpin>(
     mut reader: R,
     app: AppHandle,
@@ -523,8 +570,11 @@ async fn start_download(
 ) -> Result<(), String> {
     ensure_idle(&manager)?;
     let path = ensure_managed_ytdlp(&app)?;
-    let args = build_download_args(&request)?;
     let job_id = request.job_id.clone();
+    let saved_paths_file = saved_paths_output_path(&job_id);
+    let _ = fs::remove_file(&saved_paths_file);
+    let mut args = build_download_args(&request)?;
+    add_saved_paths_output(&mut args, &saved_paths_file)?;
     let mut command = Command::new(path);
     command.args(args).stdout(Stdio::piped()).stderr(Stdio::piped());
     #[cfg(windows)]
@@ -557,6 +607,8 @@ async fn start_download(
             .and_then(|mut active| active.take())
             .map(|active| active.cancelled && active.job_id == job_id)
             .unwrap_or(false);
+        let saved_paths = if cancelled { None } else { read_saved_paths(&saved_paths_file) };
+        let _ = fs::remove_file(&saved_paths_file);
         drop(job);
         let event = match status {
             Ok(status) => DownloadDoneEvent {
@@ -565,6 +617,7 @@ async fn start_download(
                 cancelled,
                 exit_code: status.code(),
                 error: None,
+                saved_paths,
             },
             Err(error) => DownloadDoneEvent {
                 job_id,
@@ -572,6 +625,7 @@ async fn start_download(
                 cancelled,
                 exit_code: None,
                 error: Some(error.to_string()),
+                saved_paths: None,
             },
         };
         let _ = app_for_task.emit("download-done", event);
@@ -799,5 +853,17 @@ mod tests {
                 "https://example.test/video"
             ]
         );
+    }
+
+    #[test]
+    fn inserts_saved_path_output_before_urls() {
+        let mut args = build_download_args(&video_request()).unwrap();
+        add_saved_paths_output(&mut args, Path::new(r"C:\Temp\saved-paths.txt")).unwrap();
+        let separator = args.iter().position(|arg| arg == "--").unwrap();
+        assert_eq!(
+            &args[separator - 3..separator],
+            ["--print-to-file", "after_move:filepath", r"C:\Temp\saved-paths.txt"]
+        );
+        assert_eq!(args.last().map(String::as_str), Some("https://example.test/video"));
     }
 }

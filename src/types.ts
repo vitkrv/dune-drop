@@ -45,6 +45,7 @@ export interface QueueItem {
   preset: Preset;
   status: QueueStatus;
   error?: string;
+  savedPaths?: string[];
 }
 
 export interface DownloadRequest {
@@ -70,6 +71,7 @@ export interface DownloadDoneEvent {
   cancelled: boolean;
   exitCode?: number;
   error?: string;
+  savedPaths?: string[];
 }
 
 export interface UtilityResponse {

@@ -1,11 +1,12 @@
 {
   "name": "dunedrop",
   "private": true,
-  "version": "0.1.0",
+  "version": "1.0.0",
   "type": "module",
   "scripts": {
     "dev": "vite",
     "build": "tsc -b && vite build",
+    "build:app": "powershell -NoProfile -ExecutionPolicy Bypass -File .\\scripts\\build.ps1",
     "test": "vitest run",
     "tauri": "tauri"
   },

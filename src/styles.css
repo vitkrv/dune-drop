@@ -25,7 +25,8 @@ nav { display: grid; gap: 4px; }
 .docs-link { margin-top: auto; color: #a99777; font-size: 12px; }
 .docs-link:hover { color: #ead9b8; }
 
-.workspace { padding: 0 38px 44px; overflow: hidden; }
+.workspace { display: flex; min-width: 0; min-height: 100vh; flex-direction: column; padding: 0 38px 44px; overflow: hidden; }
+.logs-workspace { height: 100vh; }
 .topbar { display: flex; align-items: center; justify-content: space-between; padding: 28px 0 22px; }
 h1, h2, p { margin: 0; }
 h1 { color: #f4ead5; font-size: 30px; letter-spacing: -.04em; }
@@ -35,6 +36,7 @@ h2 { margin: 4px 0 14px; color: #f4ead5; font-size: 18px; }
 .status i, .tool-health i { width: 8px; height: 8px; border-radius: 50%; background: #78936f; box-shadow: 0 0 12px #78936f; }
 .status.running i { background: #d7b06d; box-shadow: 0 0 12px #d7b06d; }
 .content { max-width: 1220px; }
+.logs-content { display: flex; min-height: 0; flex: 1; width: 100%; }
 .main-grid { display: grid; gap: 14px; }
 .card { padding: 20px; border: 1px solid #39342b; border-radius: 13px; background: #24221e; box-shadow: 0 14px 30px rgba(0,0,0,.1); }
 .section-kicker { color: #a89168; font-family: Consolas, monospace; font-size: 10px; letter-spacing: .14em; }
@@ -96,7 +98,8 @@ code, pre { font-family: Consolas, monospace; }
 .utility-button { margin-top: 14px; }
 .preview-card code { display: block; margin-top: 9px; overflow-wrap: anywhere; line-height: 1.7; }
 
-.log-card pre { min-height: calc(100vh - 202px); max-height: calc(100vh - 202px); margin: 16px 0 0; overflow: auto; border: 1px solid #39342b; border-radius: 8px; background: #171714; color: #c9b994; padding: 14px; font-size: 11px; line-height: 1.6; white-space: pre-wrap; }
+.log-card { display: flex; min-height: 0; flex: 1; flex-direction: column; }
+.log-card pre { flex: 1; min-height: 0; margin: 16px 0 0; overflow: auto; border: 1px solid #39342b; border-radius: 8px; background: #171714; color: #c9b994; padding: 14px; font-size: 11px; line-height: 1.6; overflow-wrap: anywhere; white-space: pre-wrap; }
 .settings-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
 .tool-card { grid-column: 1 / -1; }
 .segmented { display: flex; overflow: hidden; width: fit-content; border: 1px solid #443d32; border-radius: 8px; }

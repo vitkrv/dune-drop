@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { open, save } from "@tauri-apps/plugin-dialog";
@@ -27,6 +27,7 @@ import {
   X,
 } from "lucide-react";
 import { translator } from "./i18n";
+import { appendTerminalLogChunk, EMPTY_LOG_STATE, type LogState } from "./logs";
 import { DEFAULT_SETTINGS, loadSettings, saveSettings } from "./settings";
 import type {
   AdvancedValue,
@@ -75,6 +76,17 @@ function advancedArgs(values: AdvancedValue[]): string[] {
   return values.flatMap(({ flag, value }) => (value.trim() ? [flag, value.trim()] : [flag]));
 }
 
+function fileNameFromPath(path: string): string {
+  return path.split(/[\\/]/).filter(Boolean).pop() ?? path;
+}
+
+function oldestPending(items: QueueItem[]): QueueItem | undefined {
+  for (let index = items.length - 1; index >= 0; index -= 1) {
+    if (items[index].status === "pending") return items[index];
+  }
+  return undefined;
+}
+
 export default function App() {
   const [tab, setTab] = useState<Tab>("main");
   const [settings, setSettings] = useState<AppSettings>(DEFAULT_SETTINGS);
@@ -85,12 +97,26 @@ export default function App() {
   const [queue, setQueue] = useState<QueueItem[]>([]);
   const [runningId, setRunningId] = useState<string>();
   const [logs, setLogs] = useState("");
+  const logState = useRef<LogState>(EMPTY_LOG_STATE);
   const [notice, setNotice] = useState("");
   const [search, setSearch] = useState("");
   const [rawArgs, setRawArgs] = useState("");
   const [preview, setPreview] = useState<string[]>([]);
   const [showWarning, setShowWarning] = useState(false);
   const t = useMemo(() => translator(settings.language), [settings.language]);
+
+  const appendLogs = useCallback((chunk: string) => {
+    setLogs(() => {
+      const next = appendTerminalLogChunk(logState.current, chunk);
+      logState.current = next;
+      return next.text;
+    });
+  }, []);
+
+  const clearLogs = useCallback(() => {
+    logState.current = EMPTY_LOG_STATE;
+    setLogs("");
+  }, []);
 
   const refreshToolInfo = useCallback(async () => {
     const info = await invoke<ToolInfo>("initialize", {
@@ -121,7 +147,7 @@ export default function App() {
     let unlistenLog: (() => void) | undefined;
     let unlistenDone: (() => void) | undefined;
     void listen<DownloadLogEvent>("download-log", ({ payload }) => {
-      setLogs((current) => current + payload.chunk);
+      appendLogs(payload.chunk);
     }).then((unlisten) => {
       unlistenLog = unlisten;
     });
@@ -133,6 +159,7 @@ export default function App() {
                 ...item,
                 status: payload.cancelled ? "cancelled" : payload.success ? "completed" : "failed",
                 error: payload.error,
+                savedPaths: payload.savedPaths,
               }
             : item,
         ),
@@ -145,7 +172,7 @@ export default function App() {
       unlistenLog?.();
       unlistenDone?.();
     };
-  }, []);
+  }, [appendLogs]);
 
   const selectedArgs = useMemo(() => advancedArgs(settings.advancedValues), [settings.advancedValues]);
 
@@ -165,7 +192,7 @@ export default function App() {
 
   useEffect(() => {
     if (runningId) return;
-    const next = queue.find((item) => item.status === "pending");
+    const next = oldestPending(queue);
     if (!next) return;
     if (!next.destination) {
       setNotice(t("missingDestination"));
@@ -208,14 +235,14 @@ export default function App() {
     if (!submittedUrls.length) return setNotice(t("missingUrl"));
     if (preset === "mp3" && !toolInfo?.ffmpegAvailable) return setNotice(t("ffmpegNeeded"));
     setQueue((items) => [
-      ...items,
-      ...submittedUrls.map((url): QueueItem => ({
+      ...[...submittedUrls].reverse().map((url): QueueItem => ({
         id: makeId(),
         url,
         destination: settings.destination,
         preset,
         status: "pending",
       })),
+      ...items,
     ]);
     setUrls("");
     setNotice("");
@@ -227,7 +254,7 @@ export default function App() {
   }
 
   function retry(item: QueueItem) {
-    setQueue((items) => [...items, { ...item, id: makeId(), status: "pending", error: undefined }]);
+    setQueue((items) => [{ ...item, id: makeId(), status: "pending", error: undefined, savedPaths: undefined }, ...items]);
   }
 
   function removeItem(id: string) {
@@ -275,7 +302,7 @@ export default function App() {
   async function updateTool() {
     try {
       const result = await invoke<UtilityResponse>("update_ytdlp");
-      setLogs((current) => current + result.stdout + result.stderr);
+      appendLogs(result.stdout + result.stderr);
       await refreshToolInfo();
       setTab("logs");
     } catch (error) {
@@ -289,7 +316,7 @@ export default function App() {
         rawArgs,
         allowDangerousOptions: settings.advancedModeAcknowledged,
       });
-      setLogs((current) => current + result.stdout + result.stderr);
+      appendLogs(result.stdout + result.stderr);
       setTab("logs");
     } catch (error) {
       setNotice(`${t("toolActionFailed")}: ${String(error)}`);
@@ -341,7 +368,7 @@ export default function App() {
         </button>
       </aside>
 
-      <section className="workspace">
+      <section className={tab === "logs" ? "workspace logs-workspace" : "workspace"}>
         <header className="topbar">
           <div>
             <h1>{t(tab)}</h1>
@@ -435,9 +462,10 @@ export default function App() {
                   <article className="queue-item" key={item.id}>
                     <span className={`queue-dot ${item.status}`} />
                     <div>
-                      <strong>{item.url}</strong>
+                      <strong>{item.savedPaths?.map(fileNameFromPath).join(", ") || item.url}</strong>
                       <small>
                         {item.preset.toUpperCase()} · {statusLabel(item.status, t)}
+                        {item.savedPaths?.length ? ` · ${item.url}` : ""}
                         {item.error ? ` · ${item.error}` : ""}
                       </small>
                     </div>
@@ -561,7 +589,7 @@ export default function App() {
         )}
 
         {tab === "logs" && (
-          <div className="content">
+          <div className="content logs-content">
             <section className="card log-card">
               <div className="card-title">
                 <div>
@@ -572,7 +600,7 @@ export default function App() {
                   <button onClick={() => void navigator.clipboard.writeText(logs)}>
                     <Clipboard size={15} /> {t("copy")}
                   </button>
-                  <button onClick={() => setLogs("")}>
+                  <button onClick={clearLogs}>
                     <Trash2 size={15} /> {t("clear")}
                   </button>
                   <button onClick={() => void saveLogs()}>
