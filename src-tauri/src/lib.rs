@@ -740,8 +740,76 @@ fn run_utility(
     })
 }
 
+#[cfg(windows)]
+fn remove_emoji_context_menu_item(
+    args: &webview2_com::Microsoft::Web::WebView2::Win32::ICoreWebView2ContextMenuRequestedEventArgs,
+) -> windows::core::Result<()> {
+    use webview2_com::{
+        Microsoft::Web::WebView2::Win32::COREWEBVIEW2_CONTEXT_MENU_ITEM_KIND_SEPARATOR,
+        CoTaskMemPWSTR,
+    };
+
+    let items = unsafe { args.MenuItems()? };
+    let mut count = 0;
+    unsafe { items.Count(&mut count)? };
+    for index in 0..count {
+        let item = unsafe { items.GetValueAtIndex(index)? };
+        let mut name = windows::core::PWSTR::null();
+        unsafe { item.Name(&mut name)? };
+        if CoTaskMemPWSTR::from(name).to_string() == "emoji" {
+            unsafe { items.RemoveValueAtIndex(index)? };
+            // Emoji is the first group in WebView2's text-field menu.
+            if index == 0 && count > 1 {
+                let next = unsafe { items.GetValueAtIndex(0)? };
+                let mut kind = COREWEBVIEW2_CONTEXT_MENU_ITEM_KIND_SEPARATOR;
+                unsafe { next.Kind(&mut kind)? };
+                if kind == COREWEBVIEW2_CONTEXT_MENU_ITEM_KIND_SEPARATOR {
+                    unsafe { items.RemoveValueAtIndex(0)? };
+                }
+            }
+            break;
+        }
+    }
+    Ok(())
+}
+
+#[cfg(windows)]
+fn configure_windows_context_menu(app: &mut tauri::App) -> tauri::Result<()> {
+    use webview2_com::{
+        ContextMenuRequestedEventHandler, Microsoft::Web::WebView2::Win32::ICoreWebView2_11,
+    };
+    use windows::core::Interface;
+
+    if let Some(window) = app.get_webview_window("main") {
+        window.with_webview(|webview| {
+            let Ok(core) = (unsafe { webview.controller().CoreWebView2() }) else {
+                return;
+            };
+            let Ok(core) = core.cast::<ICoreWebView2_11>() else {
+                return;
+            };
+            let handler = ContextMenuRequestedEventHandler::create(Box::new(|_, args| {
+                if let Some(args) = args {
+                    remove_emoji_context_menu_item(&args)?;
+                }
+                Ok(())
+            }));
+            let mut token = 0;
+            if let Err(error) = unsafe { core.add_ContextMenuRequested(&handler, &mut token) } {
+                eprintln!("failed to configure WebView2 context menu: {error}");
+            }
+        })?;
+    }
+    Ok(())
+}
+
 pub fn run() {
     tauri::Builder::default()
+        .setup(|app| {
+            #[cfg(windows)]
+            configure_windows_context_menu(app)?;
+            Ok(())
+        })
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_store::Builder::default().build())

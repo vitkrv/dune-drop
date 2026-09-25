@@ -91,6 +91,8 @@ export default function App() {
   const [tab, setTab] = useState<Tab>("main");
   const [settings, setSettings] = useState<AppSettings>(DEFAULT_SETTINGS);
   const [settingsLoaded, setSettingsLoaded] = useState(false);
+  const [starting, setStarting] = useState(true);
+  const initializedFfmpegDirectory = useRef<string>();
   const [toolInfo, setToolInfo] = useState<ToolInfo>();
   const [urls, setUrls] = useState("");
   const [preset, setPreset] = useState<Preset>("video");
@@ -126,18 +128,42 @@ export default function App() {
   }, [settings.ffmpegDirectory]);
 
   useEffect(() => {
-    void loadSettings().then((loaded) => {
-      setSettings(loaded);
-      setSettingsLoaded(true);
-    });
+    let active = true;
+    void (async () => {
+      try {
+        let loaded = DEFAULT_SETTINGS;
+        let loadedSuccessfully = false;
+        try {
+          loaded = await loadSettings();
+          loadedSuccessfully = true;
+        } catch (error) {
+          if (active) setNotice(String(error));
+        }
+        if (!active) return;
+        setSettings(loaded);
+        setSettingsLoaded(loadedSuccessfully);
+        initializedFfmpegDirectory.current = loaded.ffmpegDirectory;
+        const info = await invoke<ToolInfo>("initialize", {
+          ffmpegDirectory: loaded.ffmpegDirectory || null,
+        });
+        if (active) setToolInfo(info);
+      } catch (error) {
+        if (active) setNotice(String(error));
+      } finally {
+        if (active) setStarting(false);
+      }
+    })();
+    return () => { active = false; };
   }, []);
 
   useEffect(() => {
+    if (starting || settings.ffmpegDirectory === initializedFfmpegDirectory.current) return;
     const timeout = window.setTimeout(() => {
+      initializedFfmpegDirectory.current = settings.ffmpegDirectory;
       void refreshToolInfo().catch((error) => setNotice(String(error)));
     }, 250);
     return () => window.clearTimeout(timeout);
-  }, [refreshToolInfo]);
+  }, [refreshToolInfo, settings.ffmpegDirectory, starting]);
 
   useEffect(() => {
     if (settingsLoaded) void saveSettings(settings).catch((error) => setNotice(String(error)));
@@ -342,6 +368,19 @@ export default function App() {
     { id: "logs", icon: Terminal },
     { id: "settings", icon: SettingsIcon },
   ];
+
+  if (starting) {
+    return (
+      <main className="startup-screen" role="status" aria-live="polite">
+        <div className="startup-content">
+          <img className="startup-mark" src="/dunedrop-icon.png" alt="" />
+          <h1>DuneDrop</h1>
+          <p>{t("starting")}</p>
+          <span className="startup-spinner" aria-hidden="true" />
+        </div>
+      </main>
+    );
+  }
 
   return (
     <main className="app-shell">
