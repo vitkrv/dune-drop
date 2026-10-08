@@ -17,6 +17,7 @@ export interface CatalogSection {
 }
 
 export interface ToolInfo {
+  deno: { path?: string; version?: string; available: boolean };
   version: string;
   executablePath: string;
   toolsDirectory: string;
@@ -31,6 +32,8 @@ export interface AdvancedValue {
 }
 
 export interface AppSettings {
+  cookiesEnabled: boolean;
+  firefoxProfile: string;
   language: Language;
   destination: string;
   ffmpegDirectory: string;
@@ -39,6 +42,9 @@ export interface AppSettings {
 }
 
 export interface QueueItem {
+  recoveryReason?: RecoveryReason;
+  cookiesRefreshed?: boolean;
+  recoveryError?: string;
   id: string;
   url: string;
   destination: string;
@@ -49,6 +55,8 @@ export interface QueueItem {
 }
 
 export interface DownloadRequest {
+  cookiesEnabled: boolean;
+  firefoxProfile: string;
   jobId: string;
   urls: string[];
   destination: string;
@@ -66,6 +74,7 @@ export interface DownloadLogEvent {
 }
 
 export interface DownloadDoneEvent {
+  recoveryReason?: RecoveryReason;
   jobId: string;
   success: boolean;
   cancelled: boolean;
@@ -79,3 +88,7 @@ export interface UtilityResponse {
   stderr: string;
   success: boolean;
 }
+
+export type RecoveryReason = "authorization" | "accountAccess" | "cookiesMissing" | "runtimeUnsupported";
+export interface FirefoxProfile { name: string; path: string }
+export interface CookieStatus { profile?: string; syncedAt?: number }

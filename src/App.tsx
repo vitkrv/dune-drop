@@ -26,7 +26,9 @@ import {
   Wrench,
   X,
 } from "lucide-react";
-import { translator } from "./i18n";
+import { translator, type TranslationKey } from "./i18n";
+import { CookieControls, CookieContext, RecoveryPanel } from "./CookieControls";
+import { hasCookieOverride, markCookiesRefreshed } from "./recovery";
 import { appendTerminalLogChunk, EMPTY_LOG_STATE, type LogState } from "./logs";
 import { DEFAULT_SETTINGS, loadSettings, saveSettings } from "./settings";
 import type {
@@ -42,6 +44,8 @@ import type {
   Tab,
   ToolInfo,
   UtilityResponse,
+  CookieStatus,
+  FirefoxProfile,
 } from "./types";
 
 const DOCS_URL = "https://github.com/yt-dlp/yt-dlp#usage-and-options";
@@ -92,6 +96,14 @@ export default function App() {
   const [settings, setSettings] = useState<AppSettings>(DEFAULT_SETTINGS);
   const [settingsLoaded, setSettingsLoaded] = useState(false);
   const [starting, setStarting] = useState(true);
+  const [profiles, setProfiles] = useState<FirefoxProfile[]>([]);
+  const [cookieStatus, setCookieStatus] = useState<CookieStatus>({});
+  const [cookieBusy, setCookieBusy] = useState(false);
+  const cookieBusyRef = useRef(false);
+  const [cookieError, setCookieError] = useState("");
+  const [cookieFocus, setCookieFocus] = useState(0);
+  const [denoBusy, setDenoBusy] = useState(false);
+  const [toolRevision, setToolRevision] = useState(0);
   const initializedFfmpegDirectory = useRef<string>();
   const [toolInfo, setToolInfo] = useState<ToolInfo>();
   const [urls, setUrls] = useState("");
@@ -106,6 +118,10 @@ export default function App() {
   const [preview, setPreview] = useState<string[]>([]);
   const [showWarning, setShowWarning] = useState(false);
   const t = useMemo(() => translator(settings.language), [settings.language]);
+  const errorText = useCallback((error: unknown) => {
+    const code = String(error);
+    return /^(cookie_(profile_missing|extract_failed|invalid_export|no_youtube|sync_required|sync_busy|storage_failed)|deno_install_busy|deno_refresh_failed)$/.test(code) ? t(code as TranslationKey) : code;
+  }, [t]);
 
   const appendLogs = useCallback((chunk: string) => {
     setLogs(() => {
@@ -125,7 +141,20 @@ export default function App() {
       ffmpegDirectory: settings.ffmpegDirectory || null,
     });
     setToolInfo(info);
+    setToolRevision(value => value + 1);
   }, [settings.ffmpegDirectory]);
+
+  useEffect(() => {
+    void Promise.all([invoke<FirefoxProfile[]>("firefox_profiles"), invoke<CookieStatus>("cookie_status")])
+      .then(([found, status]) => { setProfiles(found); setCookieStatus(status); })
+      .catch(error => setCookieError(String(error)));
+  }, []);
+
+  useEffect(() => {
+    if (settingsLoaded && !settings.firefoxProfile && profiles.length === 1) {
+      setSettings(current => ({ ...current, firefoxProfile: profiles[0].path }));
+    }
+  }, [profiles, settingsLoaded, settings.firefoxProfile]);
 
   useEffect(() => {
     let active = true;
@@ -186,6 +215,7 @@ export default function App() {
                 status: payload.cancelled ? "cancelled" : payload.success ? "completed" : "failed",
                 error: payload.error,
                 savedPaths: payload.savedPaths,
+                recoveryReason: payload.recoveryReason,
               }
             : item,
         ),
@@ -212,12 +242,14 @@ export default function App() {
       advancedArgs: selectedArgs,
       rawArgs,
       allowDangerousOptions: settings.advancedModeAcknowledged,
+      cookiesEnabled: settings.cookiesEnabled,
+      firefoxProfile: settings.firefoxProfile,
     }),
-    [rawArgs, selectedArgs, settings.advancedModeAcknowledged, settings.destination, settings.ffmpegDirectory],
+    [rawArgs, selectedArgs, settings.advancedModeAcknowledged, settings.destination, settings.ffmpegDirectory, settings.cookiesEnabled, settings.firefoxProfile],
   );
 
   useEffect(() => {
-    if (runningId) return;
+    if (runningId || denoBusy) return;
     const next = oldestPending(queue);
     if (!next) return;
     if (!next.destination) {
@@ -229,20 +261,69 @@ export default function App() {
     void invoke("start_download", { request: requestFor(next) }).catch((error) => {
       setRunningId(undefined);
       setQueue((items) =>
-        items.map((item) => (item.id === next.id ? { ...item, status: "failed", error: String(error) } : item)),
+        items.map((item) => (item.id === next.id ? { ...item, status: "failed", error: errorText(error), recoveryReason: String(error) === "cookie_sync_required" ? "cookiesMissing" : undefined } : item)),
       );
     });
-  }, [queue, requestFor, runningId, t]);
+  }, [queue, requestFor, runningId, t, denoBusy, errorText]);
 
   useEffect(() => {
-    const sample: QueueItem = { id: "preview", url: "URL", destination: settings.destination, preset, status: "pending" };
+    const sample: QueueItem = { id: "preview", url: splitUrls(urls)[0] || "https://www.youtube.com/watch?v=VIDEO_ID", destination: settings.destination, preset, status: "pending" };
     void invoke<string[]>("preview_download_args", { request: requestFor(sample) })
       .then(setPreview)
       .catch(() => setPreview([]));
-  }, [preset, requestFor, settings.destination]);
+  }, [preset, requestFor, settings.destination, toolRevision, urls]);
 
   function updateSettings(patch: Partial<AppSettings>) {
+    if (patch.firefoxProfile !== undefined || patch.cookiesEnabled !== undefined) {
+      setQueue(items => items.map(item => ({ ...item, cookiesRefreshed: false, recoveryError: undefined })));
+      setCookieError("");
+    }
     setSettings((current) => ({ ...current, ...patch }));
+  }
+
+  function showCookieSettings() { setCookieFocus(value => value + 1); setTab("settings"); }
+
+  async function syncCookies() {
+    if (cookieBusyRef.current) return;
+    if (!settings.firefoxProfile) { showCookieSettings(); return; }
+    cookieBusyRef.current = true;
+    setCookieBusy(true); setCookieError("");
+    try {
+      const status = await invoke<CookieStatus>("sync_cookies", { profile: settings.firefoxProfile });
+      setCookieStatus(status);
+      setQueue(markCookiesRefreshed);
+    } catch (error) {
+      const message = errorText(error);
+      setCookieError(message);
+      setQueue(items => items.map(item => item.status === "failed" && item.recoveryReason ? { ...item, recoveryError: message, cookiesRefreshed: false } : item));
+    } finally { cookieBusyRef.current = false; setCookieBusy(false); }
+  }
+
+  async function clearCookies() {
+    if (cookieBusyRef.current) return;
+    cookieBusyRef.current = true; setCookieBusy(true); setCookieError("");
+    try {
+      setCookieStatus(await invoke<CookieStatus>("clear_cookies"));
+      setQueue(items => items.map(item => ({ ...item, cookiesRefreshed: false })));
+    } catch (error) { setCookieError(errorText(error)); }
+    finally { cookieBusyRef.current = false; setCookieBusy(false); }
+  }
+
+  async function browseFirefoxProfile() {
+    const path = await open({ directory: true, multiple: false, title: t("firefoxProfile") });
+    if (typeof path === "string") updateSettings({ firefoxProfile: path });
+  }
+
+  async function installDeno() {
+    if (denoBusy || runningId) return;
+    setDenoBusy(true);
+    try {
+      const result = await invoke<UtilityResponse>("install_deno");
+      await refreshToolInfo();
+      setNotice(result.success ? t("denoInstalled") : t("denoInstallFailed"));
+      if (!result.success) setTab("logs");
+    } catch (error) { setNotice(errorText(error)); }
+    finally { setDenoBusy(false); }
   }
 
   async function pickDestination() {
@@ -280,7 +361,7 @@ export default function App() {
   }
 
   function retry(item: QueueItem) {
-    setQueue((items) => [{ ...item, id: makeId(), status: "pending", error: undefined, savedPaths: undefined }, ...items]);
+    setQueue((items) => [{ ...item, id: makeId(), status: "pending", error: undefined, savedPaths: undefined, recoveryReason: undefined, cookiesRefreshed: false, recoveryError: undefined }, ...items]);
   }
 
   function removeItem(id: string) {
@@ -405,6 +486,10 @@ export default function App() {
           <BookOpen size={16} />
           {t("help")}
         </button>
+        <div className="app-build-info">
+          <span>{t("appVersion")} {__APP_VERSION__}</span>
+          <span>{t("buildDate")} <time dateTime={__BUILD_DATE__}>{__BUILD_DATE__}</time></span>
+        </div>
       </aside>
 
       <section className={tab === "logs" ? "workspace logs-workspace" : "workspace"}>
@@ -440,6 +525,12 @@ export default function App() {
                 autoFocus
               />
               <small>{t("urlsHint")}</small>
+              <div className="tool-actions">
+                <button disabled={cookieBusy} onClick={() => settings.cookiesEnabled && settings.firefoxProfile ? void syncCookies() : showCookieSettings()}><RefreshCw size={15} />{cookieBusy ? t("syncingCookies") : t("resyncCookies")}</button>
+                <button onClick={showCookieSettings}>{t("cookieSettings")}</button>
+              </div>
+              <CookieContext status={cookieStatus} profile={settings.firefoxProfile} t={t} />
+              {cookieError && <small role="alert" className="warning-text">{cookieError}</small>}
             </section>
 
             <section className="card">
@@ -507,6 +598,10 @@ export default function App() {
                         {item.savedPaths?.length ? ` · ${item.url}` : ""}
                         {item.error ? ` · ${item.error}` : ""}
                       </small>
+                      <RecoveryPanel item={item} settings={settings} status={cookieStatus} busy={cookieBusy}
+                        overridden={hasCookieOverride(selectedArgs, rawArgs)} t={t}
+                        sync={() => void syncCookies()} setup={showCookieSettings} logs={() => setTab("logs")}
+                        advanced={() => setTab("advanced")} retry={() => retry(item)} updateTool={() => void updateTool()} />
                     </div>
                     <div className="queue-actions">
                       {item.status === "completed" && (
@@ -654,6 +749,17 @@ export default function App() {
 
         {tab === "settings" && (
           <div className="content settings-grid">
+            <CookieControls settings={settings} status={cookieStatus} profiles={profiles} busy={cookieBusy}
+              error={cookieError} focus={cookieFocus} t={t} update={updateSettings}
+              browse={() => void browseFirefoxProfile()} sync={() => void syncCookies()} clear={() => void clearCookies()} />
+            <section className="card">
+              <h2>{t("denoTitle")}</h2>
+              <p>{t("denoHint")}</p>
+              <dl><dt>{t("toolVersion")}</dt><dd>{toolInfo?.deno.version || "—"}</dd><dt>deno.exe</dt><dd>{toolInfo?.deno.path || "—"}</dd></dl>
+              <div className={toolInfo?.deno.available ? "tool-health ok" : "tool-health"}><i />Deno {toolInfo?.deno.available ? t("available") : t("notFound")}</div>
+              <div className="tool-actions"><button disabled={denoBusy || Boolean(runningId)} onClick={() => void installDeno()}>{denoBusy ? t("installingDeno") : t("installDeno")}</button><button onClick={() => setTab("logs")}>{t("viewLogs")}</button></div>
+              {denoBusy && <small role="status">{t("installingDeno")}</small>}
+            </section>
             <section className="card">
               <div className="section-kicker">APP</div>
               <h2>{t("language")}</h2>

@@ -13,6 +13,8 @@ const SENSITIVE_FLAGS = new Set([
 ]);
 
 export const DEFAULT_SETTINGS: AppSettings = {
+  cookiesEnabled: false,
+  firefoxProfile: "",
   language: "en",
   destination: "",
   ffmpegDirectory: "",

@@ -1,4 +1,6 @@
 use serde::{Deserialize, Serialize};
+mod auth;
+mod runtime;
 use std::{
     env,
     fs,
@@ -63,6 +65,7 @@ struct ToolInfo {
     ffmpeg_directory: Option<String>,
     ffmpeg_available: bool,
     catalog: Vec<CatalogSection>,
+    deno: runtime::DenoInfo,
 }
 
 #[derive(Deserialize)]
@@ -76,6 +79,10 @@ struct DownloadRequest {
     advanced_args: Vec<String>,
     raw_args: String,
     allow_dangerous_options: bool,
+    #[serde(default)]
+    cookies_enabled: bool,
+    #[serde(default)]
+    firefox_profile: String,
 }
 
 #[derive(Clone, Serialize)]
@@ -98,6 +105,7 @@ struct DownloadDoneEvent {
     error: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     saved_paths: Option<Vec<String>>,
+    recovery_reason: Option<auth::RecoveryReason>,
 }
 
 #[derive(Serialize)]
@@ -111,6 +119,9 @@ struct UtilityResponse {
 #[derive(Default)]
 struct ProcessManager {
     active: Arc<Mutex<Option<ActiveProcess>>>,
+    maintenance: Arc<std::sync::atomic::AtomicBool>,
+    gate: Mutex<()>,
+    cookies: Arc<Mutex<()>>,
 }
 
 struct ActiveProcess {
@@ -238,6 +249,9 @@ fn ensure_embedded_at(path: &Path) -> Result<(), String> {
 }
 
 fn ensure_idle(manager: &ProcessManager) -> Result<(), String> {
+    if manager.maintenance.load(std::sync::atomic::Ordering::SeqCst) {
+        return Err("deno_install_busy".into());
+    }
     if manager.active.lock().map_err(|_| "Process lock poisoned")?.is_some() {
         return Err("Wait for the active download to finish first".into());
     }
@@ -245,7 +259,9 @@ fn ensure_idle(manager: &ProcessManager) -> Result<(), String> {
 }
 
 fn command_output(path: &Path, args: &[&str]) -> Result<std::process::Output, String> {
-    std::process::Command::new(path)
+    let mut command = std::process::Command::new(path);
+    if let Some(path) = runtime::child_path() { command.env("PATH", path); }
+    command
         .args(args)
         .creation_flags_no_window()
         .output()
@@ -413,6 +429,7 @@ fn tool_info(app: &AppHandle, ffmpeg_directory: Option<&str>) -> Result<ToolInfo
         ffmpeg_directory: detected_ffmpeg.as_ref().map(|path| path.to_string_lossy().into_owned()),
         ffmpeg_available: detected_ffmpeg.is_some(),
         catalog: ytdlp_catalog(&path)?,
+        deno: runtime::detect(),
     })
 }
 
@@ -535,7 +552,8 @@ async fn stream_output<R: AsyncRead + Unpin>(
     app: AppHandle,
     job_id: String,
     stream: &'static str,
-) -> io::Result<()> {
+) -> io::Result<auth::Diagnostics> {
+    let mut diagnostics = auth::Diagnostics::default();
     let mut buffer = vec![0_u8; 4096];
     loop {
         let read = reader.read(&mut buffer).await?;
@@ -547,9 +565,10 @@ async fn stream_output<R: AsyncRead + Unpin>(
             stream: stream.into(),
             chunk: String::from_utf8_lossy(&buffer[..read]).into_owned(),
         };
+        diagnostics.push(&event.chunk);
         let _ = app.emit("download-log", event);
     }
-    Ok(())
+    Ok(diagnostics)
 }
 
 #[tauri::command]
@@ -558,8 +577,20 @@ fn initialize(app: AppHandle, ffmpeg_directory: Option<String>) -> Result<ToolIn
 }
 
 #[tauri::command]
-fn preview_download_args(request: DownloadRequest) -> Result<Vec<String>, String> {
-    build_download_args(&request)
+fn preview_download_args(app: AppHandle, request: DownloadRequest) -> Result<Vec<String>, String> {
+    let mut args = build_download_args(&request)?;
+    let index = args.iter().position(|a| a == "--").unwrap();
+    let urls = args.split_off(index);
+    runtime::add_deno(&mut args, &runtime::detect());
+    if managed_cookies_needed(&request, &args) {
+        args.extend(["--cookies".into(), app_tools_dir(&app)?.parent().unwrap().join("auth/<download-cookie-copy>.txt").to_string_lossy().into_owned()]);
+    }
+    args.extend(urls);
+    Ok(args)
+}
+
+fn managed_cookies_needed(request: &DownloadRequest, args: &[String]) -> bool {
+    request.cookies_enabled && request.urls.iter().any(|u| auth::is_youtube(u)) && !runtime::has_option(args, &["--cookies", "--cookies-from-browser", "--no-cookies", "--no-cookies-from-browser"])
 }
 
 #[tauri::command]
@@ -568,15 +599,28 @@ async fn start_download(
     manager: State<'_, ProcessManager>,
     request: DownloadRequest,
 ) -> Result<(), String> {
+    let _gate = manager.gate.lock().map_err(|_| "Process lock poisoned")?;
     ensure_idle(&manager)?;
     let path = ensure_managed_ytdlp(&app)?;
     let job_id = request.job_id.clone();
     let saved_paths_file = saved_paths_output_path(&job_id);
     let _ = fs::remove_file(&saved_paths_file);
     let mut args = build_download_args(&request)?;
+    let separator = args.iter().position(|a| a == "--").unwrap();
+    let urls = args.split_off(separator);
+    runtime::add_deno(&mut args, &runtime::detect());
+    let cookie_copy = if managed_cookies_needed(&request, &args) {
+        let _lock = manager.cookies.lock().map_err(|_| "Cookie lock poisoned")?;
+        let dir = app_tools_dir(&app)?.parent().unwrap().join("auth");
+        let copy = auth::job_copy(&dir, &request.firefox_profile)?;
+        args.extend(["--cookies".into(), copy.0.to_string_lossy().into_owned()]);
+        Some(copy)
+    } else { None };
+    args.extend(urls);
     add_saved_paths_output(&mut args, &saved_paths_file)?;
     let mut command = Command::new(path);
-    command.args(args).stdout(Stdio::piped()).stderr(Stdio::piped());
+    if let Some(path) = runtime::child_path() { command.env("PATH", path); }
+    command.args(args).stdout(Stdio::piped()).stderr(Stdio::piped()).kill_on_drop(true);
     #[cfg(windows)]
     {
         use std::os::windows::process::CommandExt;
@@ -599,8 +643,8 @@ async fn start_download(
         let stdout_task = tokio::spawn(stream_output(stdout, app_for_task.clone(), job_id.clone(), "stdout"));
         let stderr_task = tokio::spawn(stream_output(stderr, app_for_task.clone(), job_id.clone(), "stderr"));
         let status = child.wait().await;
-        let _ = stdout_task.await;
-        let _ = stderr_task.await;
+        let stdout_diagnostics = stdout_task.await.ok().and_then(Result::ok).unwrap_or_default();
+        let stderr_diagnostics = stderr_task.await.ok().and_then(Result::ok).unwrap_or_default();
         let cancelled = manager_inner
             .lock()
             .ok()
@@ -610,6 +654,10 @@ async fn start_download(
         let saved_paths = if cancelled { None } else { read_saved_paths(&saved_paths_file) };
         let _ = fs::remove_file(&saved_paths_file);
         drop(job);
+        drop(cookie_copy);
+        let youtube = request.urls.iter().any(|u| auth::is_youtube(u));
+        let success = status.as_ref().map(|s| s.success()).unwrap_or(false);
+        let recovery_reason = stderr_diagnostics.recovery(youtube, success, cancelled).or_else(|| stdout_diagnostics.recovery(youtube, success, cancelled));
         let event = match status {
             Ok(status) => DownloadDoneEvent {
                 job_id,
@@ -618,6 +666,7 @@ async fn start_download(
                 exit_code: status.code(),
                 error: None,
                 saved_paths,
+                recovery_reason,
             },
             Err(error) => DownloadDoneEvent {
                 job_id,
@@ -626,6 +675,7 @@ async fn start_download(
                 exit_code: None,
                 error: Some(error.to_string()),
                 saved_paths: None,
+                recovery_reason,
             },
         };
         let _ = app_for_task.emit("download-done", event);
@@ -686,6 +736,8 @@ fn replace_ytdlp(
     source_path: String,
     ffmpeg_directory: Option<String>,
 ) -> Result<ToolInfo, String> {
+    let _gate = manager.gate.lock().map_err(|_| "Process lock poisoned")?;
+    let _cookies = manager.cookies.try_lock().map_err(|_| "cookie_sync_busy")?;
     ensure_idle(&manager)?;
     let source = PathBuf::from(source_path);
     if !source.is_file() {
@@ -710,6 +762,8 @@ fn replace_ytdlp(
 
 #[tauri::command]
 fn update_ytdlp(app: AppHandle, manager: State<'_, ProcessManager>) -> Result<UtilityResponse, String> {
+    let _gate = manager.gate.lock().map_err(|_| "Process lock poisoned")?;
+    let _cookies = manager.cookies.try_lock().map_err(|_| "cookie_sync_busy")?;
     ensure_idle(&manager)?;
     let path = ensure_managed_ytdlp(&app)?;
     let output = command_output(&path, &["--update"])?;
@@ -727,9 +781,14 @@ fn run_utility(
     raw_args: String,
     allow_dangerous_options: bool,
 ) -> Result<UtilityResponse, String> {
+    let _gate = manager.gate.lock().map_err(|_| "Process lock poisoned")?;
     ensure_idle(&manager)?;
     let path = ensure_managed_ytdlp(&app)?;
-    let args = parse_raw_args(&raw_args)?;
+    let mut args = parse_raw_args(&raw_args)?;
+    let separator = args.iter().position(|a| a == "--").unwrap_or(args.len());
+    let tail = args.split_off(separator);
+    runtime::add_deno(&mut args, &runtime::detect());
+    args.extend(tail);
     validate_args(&args, allow_dangerous_options)?;
     let string_args = args.iter().map(String::as_str).collect::<Vec<_>>();
     let output = command_output(&path, &string_args)?;
@@ -803,6 +862,62 @@ fn configure_windows_context_menu(app: &mut tauri::App) -> tauri::Result<()> {
     Ok(())
 }
 
+#[tauri::command]
+fn firefox_profiles() -> Vec<auth::FirefoxProfile> { auth::discover_profiles() }
+
+#[tauri::command]
+fn cookie_status(app: AppHandle) -> Result<auth::CookieStatus, String> {
+    Ok(auth::status(&app_tools_dir(&app)?.parent().unwrap().join("auth")))
+}
+
+#[tauri::command]
+async fn sync_cookies(app: AppHandle, manager: State<'_, ProcessManager>, profile: String) -> Result<auth::CookieStatus, String> {
+    let lock = Arc::clone(&manager.cookies);
+    tauri::async_runtime::spawn_blocking(move || {
+        let _lock = lock.try_lock().map_err(|_| "cookie_sync_busy")?;
+        let dir = auth::private_dir(app_tools_dir(&app)?.parent().unwrap())?;
+        auth::sync(&dir, &ensure_managed_ytdlp(&app)?, &profile)
+    }).await.map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+async fn clear_cookies(app: AppHandle, manager: State<'_, ProcessManager>) -> Result<auth::CookieStatus, String> {
+    let lock = Arc::clone(&manager.cookies);
+    tauri::async_runtime::spawn_blocking(move || {
+        let _lock = lock.try_lock().map_err(|_| "cookie_sync_busy")?;
+        auth::clear(&app_tools_dir(&app)?.parent().unwrap().join("auth"))?;
+        Ok(auth::CookieStatus::default())
+    }).await.map_err(|e| e.to_string())?
+}
+
+struct MaintenanceGuard(Arc<std::sync::atomic::AtomicBool>);
+impl Drop for MaintenanceGuard { fn drop(&mut self) { self.0.store(false, std::sync::atomic::Ordering::SeqCst); } }
+
+#[tauri::command]
+async fn install_deno(app: AppHandle, manager: State<'_, ProcessManager>) -> Result<UtilityResponse, String> {
+    let guard = {
+        let _gate = manager.gate.lock().map_err(|_| "Process lock poisoned")?;
+        ensure_idle(&manager)?;
+        manager.maintenance.store(true, std::sync::atomic::Ordering::SeqCst);
+        MaintenanceGuard(Arc::clone(&manager.maintenance))
+    };
+    let script = auth::TempFile::new(&app_tools_dir(&app)?, "ps1");
+    fs::write(&script.0, include_str!("../../scripts/Install-Deno.ps1")).map_err(|e| e.to_string())?;
+    let mut command = Command::new("powershell.exe");
+    command.args(["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File"]).arg(&script.0).env_remove("PSModulePath").stdout(Stdio::piped()).stderr(Stdio::piped()).kill_on_drop(true);
+    #[cfg(windows)] command.creation_flags(windows_sys::Win32::System::Threading::CREATE_NO_WINDOW);
+    let mut child = command.spawn().map_err(|e| e.to_string())?;
+    let stdout = child.stdout.take().ok_or("Missing installer output")?;
+    let stderr = child.stderr.take().ok_or("Missing installer output")?;
+    let out = tauri::async_runtime::spawn(stream_output(stdout, app.clone(), "deno-install".into(), "stdout"));
+    let err = tauri::async_runtime::spawn(stream_output(stderr, app, "deno-install".into(), "stderr"));
+    let status = child.wait().await.map_err(|e| e.to_string())?;
+    let _ = out.await; let _ = err.await;
+    if status.success() { runtime::refresh_environment()?; }
+    drop(guard); drop(script);
+    Ok(UtilityResponse { stdout: String::new(), stderr: if status.success() { String::new() } else { "deno_install_failed".into() }, success: status.success() })
+}
+
 pub fn run() {
     tauri::Builder::default()
         .setup(|app| {
@@ -825,6 +940,11 @@ pub fn run() {
             replace_ytdlp,
             update_ytdlp,
             run_utility,
+            firefox_profiles,
+            cookie_status,
+            sync_cookies,
+            clear_cookies,
+            install_deno,
         ])
         .run(tauri::generate_context!())
         .expect("error while running DuneDrop");
@@ -846,6 +966,8 @@ mod tests {
     fn video_request() -> DownloadRequest {
         DownloadRequest {
             job_id: "test".into(),
+            cookies_enabled: false,
+            firefox_profile: String::new(),
             urls: vec!["https://example.test/video".into()],
             destination: r"C:\Downloads".into(),
             preset: "video".into(),
@@ -854,6 +976,25 @@ mod tests {
             raw_args: r#"--proxy "http://localhost:8080""#.into(),
             allow_dangerous_options: false,
         }
+    }
+
+    #[test]
+    fn managed_cookies_respect_explicit_overrides_and_site() {
+        let mut request = video_request(); request.cookies_enabled = true;
+        request.urls = vec!["https://youtube.com/watch?v=x".into()];
+        assert!(managed_cookies_needed(&request, &[]));
+        for flag in ["--cookies=x", "--cookies-from-browser", "--no-cookies", "--no-cookies-from-browser"] { assert!(!managed_cookies_needed(&request, &[flag.into()])); }
+        request.urls = vec!["https://example.test".into()]; assert!(!managed_cookies_needed(&request, &[]));
+    }
+
+    #[test]
+    fn maintenance_and_cookie_operations_are_exclusive() {
+        let manager = ProcessManager::default(); assert!(ensure_idle(&manager).is_ok());
+        manager.maintenance.store(true, std::sync::atomic::Ordering::SeqCst);
+        let guard = MaintenanceGuard(Arc::clone(&manager.maintenance)); assert!(ensure_idle(&manager).is_err());
+        drop(guard); assert!(ensure_idle(&manager).is_ok());
+        let sync = manager.cookies.lock().unwrap(); assert!(manager.cookies.try_lock().is_err());
+        drop(sync); assert!(manager.cookies.try_lock().is_ok());
     }
 
     #[test]
