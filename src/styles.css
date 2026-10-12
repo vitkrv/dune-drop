@@ -144,3 +144,21 @@ select:focus-visible, button:focus-visible { outline: 2px solid #cfb786; outline
 .queue-item:has(.recovery-panel) .queue-dot { margin-top: 5px; flex-shrink: 0; }
 .app-updates progress { display: block; width: 100%; margin: 12px 0; }
 .app-release-notes { white-space: pre-wrap; overflow-wrap: anywhere; max-height: 220px; overflow: auto; font: inherit; }
+.app-update-header { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 18px; }
+.app-update-header h2 { margin: 0 0 8px; }
+.app-update-header strong { color: #e5d6ba; }
+.app-updates .app-update-primary { display: inline-flex; align-items: center; justify-content: center; gap: 9px; min-height: 44px; padding: 11px 16px; border: 1px solid #cfb786; border-radius: 9px; background: #cfb786; color: #26221c; font-size: 14px; font-weight: 700; line-height: 1.4; }
+.app-updates .app-update-primary:hover:not(:disabled) { border-color: #e2ca97; background: #e2ca97; color: #26221c; }
+.app-update-result { display: flex; align-items: flex-start; gap: 13px; margin-top: 20px; padding: 18px 20px; border: 1px solid #594a33; border-radius: 10px; background: #302a20; color: #e3c99b; }
+.app-update-result svg, .app-update-available svg { flex-shrink: 0; margin-top: 1px; }
+.app-update-result p { margin: 0; color: inherit; font-size: 16px; font-weight: 600; line-height: 1.55; overflow-wrap: anywhere; }
+.app-update-result-success { border-color: #4f6545; background: #252e22; color: #c4d7b8; }
+.app-update-result-error { border-color: #805641; background: #35271f; color: #edbca2; }
+.app-update-release { margin-top: 20px; padding: 20px; border: 1px solid #665535; border-radius: 10px; background: #1e1c18; }
+.app-update-available { display: flex; align-items: flex-start; gap: 12px; color: #e5c892; font-size: 18px; line-height: 1.5; }
+.app-update-release .app-release-notes { margin: 14px 0 18px; color: #c5b699; font-size: 14px; line-height: 1.6; }
+.app-update-actions { gap: 10px; margin-bottom: 0; }
+.app-update-guidance { margin-top: 20px; padding-top: 14px; border-top: 1px solid #39342b; }
+.app-update-guidance p { line-height: 1.6; }
+.app-update-spinner { animation: startup-spin 1s linear infinite; }
+@media (prefers-reduced-motion: reduce) { .app-update-spinner { animation: none; } }
