@@ -7,7 +7,7 @@ DuneDrop is a Windows 11 x64 desktop GUI for [`yt-dlp`](https://github.com/yt-dl
 - The release is one portable `DuneDrop.exe`.
 - The embedded `src-tauri/resources/bin/yt-dlp.exe` is extracted on first launch to `%LOCALAPPDATA%\DuneDrop\tools\yt-dlp.exe`.
 - An existing extracted executable is never overwritten automatically. Use Settings to reveal the managed tools folder, replace the executable, or explicitly invoke its updater.
-- MP3 extraction requires `ffmpeg.exe` and `ffprobe.exe` on `PATH` or in the configured ffmpeg folder. They are intentionally not bundled.
+- MP3 extraction requires `ffmpeg.exe` and `ffprobe.exe` installed through Settings, on `PATH`, or in the configured ffmpeg folder. They are intentionally not bundled.
 - Ordinary settings are persisted locally. Passwords, two-factor values, and raw argument text are not persisted.
 - Firefox cookies are opt-in and refreshed manually. Only YouTube-domain cookies are saved in a protected current-user folder under `%LOCALAPPDATA%\DuneDrop\auth`. Each download uses a disposable copy.
 - Deno is detected from its user installation and `PATH`, and its absolute path is passed to yt-dlp so it works immediately after installation.
@@ -46,7 +46,11 @@ For JavaScript support, click **Install / Update Deno** in Settings. Installatio
 
 ## Install FFmpeg for MP3 downloads
 
-`ffprobe.exe` is included with FFmpeg. To install the latest stable Windows essentials build for the current user, close DuneDrop and run:
+Open Settings and click **Install / Update FFmpeg**. The app downloads the latest Windows release essentials build from [Gyan](https://www.gyan.dev/ffmpeg/builds/), a Windows build provider linked by [FFmpeg](https://ffmpeg.org/download.html). It verifies the published SHA256 checksum and validates both `ffmpeg.exe` and `ffprobe.exe` before replacing them. Progress and errors appear in Logs, just like Deno. Installation is blocked during downloads or other tool maintenance.
+
+Both tools are installed under `%LOCALAPPDATA%\FFmpeg` for the current user, without administrator rights. DuneDrop detects this folder immediately and passes it to yt-dlp, including argument previews and utility commands. A configured folder or explicit advanced `--ffmpeg-location` takes precedence. Clear the folder setting to use the installed tools. Failed downloads, checksum checks, validation, or replacement preserve the previous executables. Existing terminals need reopening to refresh user `PATH`.
+
+For manual installation, close DuneDrop and run:
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File .\scripts\Install-FFmpeg.ps1
@@ -54,7 +58,7 @@ powershell -ExecutionPolicy Bypass -File .\scripts\Install-FFmpeg.ps1
 
 The script downloads the stable release from [gyan.dev](https://www.gyan.dev/ffmpeg/builds/), installs `ffmpeg.exe` and `ffprobe.exe` under `%LOCALAPPDATA%\FFmpeg`, adds that folder to the user `PATH`, and prints both installed versions.
 
-In DuneDrop, open Settings and select this ffmpeg folder if automatic detection has not refreshed yet:
+The default installation folder is:
 
 ```text
 %LOCALAPPDATA%\FFmpeg
@@ -151,6 +155,7 @@ Additional offline verification:
 ```powershell
 python .\scripts\Test-CookieExport.py
 powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\Test-DenoInstaller.ps1
+powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\Test-FFmpegInstaller.ps1
 ```
 
-These use synthetic cookies and a fake local runtime; they do not read your Firefox session, install Deno, or change your user PATH.
+These use synthetic cookies and fake local tools; they do not read your Firefox session, install Deno or FFmpeg, or change your user PATH.

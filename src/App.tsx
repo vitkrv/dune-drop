@@ -104,6 +104,7 @@ export default function App() {
   const [cookieError, setCookieError] = useState("");
   const [cookieFocus, setCookieFocus] = useState(0);
   const [denoBusy, setDenoBusy] = useState(false);
+  const [ffmpegBusy, setFfmpegBusy] = useState(false);
   const [applyingUpdate, setApplyingUpdate] = useState(false);
   const shellRef = useRef<HTMLElement>(null);
   useEffect(() => { shellRef.current?.toggleAttribute("inert", applyingUpdate); }, [applyingUpdate]);
@@ -124,7 +125,7 @@ export default function App() {
   const t = useMemo(() => translator(settings.language), [settings.language]);
   const errorText = useCallback((error: unknown) => {
     const code = String(error);
-    return /^(cookie_(profile_missing|extract_failed|invalid_export|no_youtube|sync_required|sync_busy|storage_failed)|deno_install_busy|deno_refresh_failed|appUpdateBusy)$/.test(code) ? t(code as TranslationKey) : code;
+    return /^(cookie_(profile_missing|extract_failed|invalid_export|no_youtube|sync_required|sync_busy|storage_failed)|deno_install_busy|tool_install_busy|deno_refresh_failed|appUpdateBusy)$/.test(code) ? t(code as TranslationKey) : code;
   }, [t]);
 
   const appendLogs = useCallback((chunk: string) => {
@@ -259,7 +260,7 @@ export default function App() {
   );
 
   useEffect(() => {
-    if (runningId || denoBusy || applyingUpdate) return;
+    if (runningId || denoBusy || ffmpegBusy || applyingUpdate) return;
     const next = oldestPending(queue);
     if (!next) return;
     if (!next.destination) {
@@ -274,7 +275,7 @@ export default function App() {
         items.map((item) => (item.id === next.id ? { ...item, status: "failed", error: errorText(error), recoveryReason: String(error) === "cookie_sync_required" ? "cookiesMissing" : undefined } : item)),
       );
     });
-  }, [queue, requestFor, runningId, t, denoBusy, applyingUpdate, errorText]);
+  }, [queue, requestFor, runningId, t, denoBusy, ffmpegBusy, applyingUpdate, errorText]);
 
   useEffect(() => {
     const sample: QueueItem = { id: "preview", url: splitUrls(urls)[0] || "https://www.youtube.com/watch?v=VIDEO_ID", destination: settings.destination, preset, status: "pending" };
@@ -325,7 +326,7 @@ export default function App() {
   }
 
   async function installDeno() {
-    if (denoBusy || runningId) return;
+    if (denoBusy || ffmpegBusy || applyingUpdate || runningId) return;
     setDenoBusy(true);
     try {
       const result = await invoke<UtilityResponse>("install_deno");
@@ -334,6 +335,21 @@ export default function App() {
       if (!result.success) setTab("logs");
     } catch (error) { setNotice(errorText(error)); }
     finally { setDenoBusy(false); }
+  }
+
+  async function installFfmpeg() {
+    if (denoBusy || ffmpegBusy || applyingUpdate || runningId) return;
+    setFfmpegBusy(true);
+    try {
+      const result = await invoke<UtilityResponse>("install_ffmpeg");
+      await refreshToolInfo();
+      setNotice(result.success ? t("ffmpegInstalled") : t("ffmpegInstallFailed"));
+      if (!result.success) setTab("logs");
+    } catch (error) {
+      setNotice(t("ffmpegInstallFailed"));
+      appendLogs(String(error));
+      setTab("logs");
+    } finally { setFfmpegBusy(false); }
   }
 
   async function pickDestination() {
@@ -719,7 +735,7 @@ export default function App() {
                     <label>{t("rawArgs")}</label>
                     <textarea className="raw-input" value={rawArgs} onChange={(event) => setRawArgs(event.target.value)} />
                     <small>{t("rawArgsHint")}</small>
-                    <button className="secondary-action utility-button" onClick={() => void runUtility()}>
+                    <button className="secondary-action utility-button" disabled={denoBusy || ffmpegBusy || applyingUpdate || Boolean(runningId)} onClick={() => void runUtility()}>
                       <Terminal size={15} /> {t("runUtility")}
                     </button>
                     <small>{t("utilityHint")}</small>
@@ -761,7 +777,7 @@ export default function App() {
 
         {tab === "settings" && (
           <div className="content settings-grid">
-            <AppUpdates t={t} queueLength={queue.length} maintenance={denoBusy || cookieBusy || Boolean(runningId)}
+            <AppUpdates t={t} queueLength={queue.length} maintenance={denoBusy || ffmpegBusy || cookieBusy || Boolean(runningId)}
               flushSettings={() => saveSettings(settings)} setApplying={setApplyingUpdate} />
             <CookieControls settings={settings} status={cookieStatus} profiles={profiles} busy={cookieBusy}
               error={cookieError} focus={cookieFocus} t={t} update={updateSettings}
@@ -771,7 +787,7 @@ export default function App() {
               <p>{t("denoHint")}</p>
               <dl><dt>{t("toolVersion")}</dt><dd>{toolInfo?.deno.version || "—"}</dd><dt>deno.exe</dt><dd>{toolInfo?.deno.path || "—"}</dd></dl>
               <div className={toolInfo?.deno.available ? "tool-health ok" : "tool-health"}><i />Deno {toolInfo?.deno.available ? t("available") : t("notFound")}</div>
-              <div className="tool-actions"><button disabled={denoBusy || Boolean(runningId)} onClick={() => void installDeno()}>{denoBusy ? t("installingDeno") : t("installDeno")}</button><button onClick={() => setTab("logs")}>{t("viewLogs")}</button></div>
+              <div className="tool-actions"><button disabled={denoBusy || ffmpegBusy || applyingUpdate || Boolean(runningId)} onClick={() => void installDeno()}>{denoBusy ? t("installingDeno") : t("installDeno")}</button><button onClick={() => setTab("logs")}>{t("viewLogs")}</button></div>
               {denoBusy && <small role="status">{t("installingDeno")}</small>}
             </section>
             <section className="card">
@@ -788,7 +804,9 @@ export default function App() {
             </section>
             <section className="card">
               <div className="section-kicker">POST-PROCESSING</div>
-              <h2>{t("ffmpegFolder")}</h2>
+              <h2>FFmpeg</h2>
+              <p>{t("ffmpegInstallHint")}</p>
+              <dl><dt>{t("ffmpegFolder")}</dt><dd>{toolInfo?.ffmpegDirectory || "—"}</dd></dl>
               <div className="field-row">
                 <input
                   value={settings.ffmpegDirectory}
@@ -800,6 +818,8 @@ export default function App() {
                 </button>
               </div>
               <small>{t("ffmpegHint")}</small>
+              <div className="tool-actions"><button disabled={denoBusy || ffmpegBusy || applyingUpdate || Boolean(runningId)} onClick={() => void installFfmpeg()}>{ffmpegBusy ? t("installingFfmpeg") : t("installFfmpeg")}</button><button onClick={() => setTab("logs")}>{t("viewLogs")}</button></div>
+              {ffmpegBusy && <small role="status">{t("installingFfmpeg")}</small>}
               <div className={toolInfo?.ffmpegAvailable ? "tool-health ok" : "tool-health"}>
                 <i /> ffmpeg + ffprobe {toolInfo?.ffmpegAvailable ? t("available") : t("notFound")}
               </div>
@@ -817,10 +837,10 @@ export default function App() {
                 <button onClick={() => void invoke("reveal_tools_folder")}>
                   <FolderOpen size={15} /> {t("revealTools")}
                 </button>
-                <button onClick={() => void replaceTool()}>
+                <button disabled={denoBusy || ffmpegBusy || applyingUpdate || Boolean(runningId)} onClick={() => void replaceTool()}>
                   <RefreshCw size={15} /> {t("replaceTool")}
                 </button>
-                <button onClick={() => void updateTool()}>
+                <button disabled={denoBusy || ffmpegBusy || applyingUpdate || Boolean(runningId)} onClick={() => void updateTool()}>
                   <Download size={15} /> {t("updateTool")}
                 </button>
               </div>

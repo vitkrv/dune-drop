@@ -251,7 +251,7 @@ fn ensure_embedded_at(path: &Path) -> Result<(), String> {
 
 fn ensure_idle(manager: &ProcessManager) -> Result<(), String> {
     if manager.maintenance.load(std::sync::atomic::Ordering::SeqCst) {
-        return Err("deno_install_busy".into());
+        return Err("tool_install_busy".into());
     }
     if manager.active.lock().map_err(|_| "Process lock poisoned")?.is_some() {
         return Err("Wait for the active download to finish first".into());
@@ -409,6 +409,12 @@ fn detect_ffmpeg(configured_directory: Option<&str>) -> Option<PathBuf> {
         }
         return None;
     }
+    if let Some(root) = env::var_os("LOCALAPPDATA") {
+        let directory = PathBuf::from(root).join("FFmpeg");
+        if directory.join("ffmpeg.exe").is_file() && directory.join("ffprobe.exe").is_file() {
+            return Some(directory);
+        }
+    }
     let ffmpeg = find_executable("ffmpeg.exe")?;
     let ffprobe = find_executable("ffprobe.exe")?;
     let ffmpeg_parent = ffmpeg.parent()?;
@@ -492,15 +498,22 @@ fn build_download_args(request: &DownloadRequest) -> Result<Vec<String>, String>
         }
         _ => return Err("Unknown download preset".into()),
     }
-    if let Some(directory) = request.ffmpeg_directory.as_deref().filter(|value| !value.trim().is_empty()) {
-        args.extend(["--ffmpeg-location".into(), directory.to_owned()]);
-    }
     args.extend(request.advanced_args.clone());
     args.extend(parse_raw_args(&request.raw_args)?);
+    add_ffmpeg(&mut args, request.ffmpeg_directory.as_deref());
     validate_args(&args, request.allow_dangerous_options)?;
     args.push("--".into());
     args.extend(request.urls.clone());
     Ok(args)
+}
+
+fn add_ffmpeg(args: &mut Vec<String>, configured: Option<&str>) {
+    if runtime::has_option(args, &["--ffmpeg-location"]) { return; }
+    let directory = configured.filter(|s| !s.trim().is_empty()).map(PathBuf::from)
+        .or_else(|| detect_ffmpeg(None));
+    if let Some(directory) = directory {
+        args.extend(["--ffmpeg-location".into(), directory.to_string_lossy().into_owned()]);
+    }
 }
 
 fn saved_paths_output_path(job_id: &str) -> PathBuf {
@@ -789,6 +802,7 @@ fn run_utility(
     let separator = args.iter().position(|a| a == "--").unwrap_or(args.len());
     let tail = args.split_off(separator);
     runtime::add_deno(&mut args, &runtime::detect());
+    add_ffmpeg(&mut args, None);
     args.extend(tail);
     validate_args(&args, allow_dangerous_options)?;
     let string_args = args.iter().map(String::as_str).collect::<Vec<_>>();
@@ -898,6 +912,15 @@ impl Drop for MaintenanceGuard { fn drop(&mut self) { self.0.store(false, std::s
 
 #[tauri::command]
 async fn install_deno(app: AppHandle, manager: State<'_, ProcessManager>) -> Result<UtilityResponse, String> {
+    run_installer(app, &manager, "deno").await
+}
+
+#[tauri::command]
+async fn install_ffmpeg(app: AppHandle, manager: State<'_, ProcessManager>) -> Result<UtilityResponse, String> {
+    run_installer(app, &manager, "ffmpeg").await
+}
+
+async fn run_installer(app: AppHandle, manager: &ProcessManager, tool: &str) -> Result<UtilityResponse, String> {
     let guard = {
         let _gate = manager.gate.lock().map_err(|_| "Process lock poisoned")?;
         ensure_idle(&manager)?;
@@ -905,20 +928,20 @@ async fn install_deno(app: AppHandle, manager: State<'_, ProcessManager>) -> Res
         MaintenanceGuard(Arc::clone(&manager.maintenance))
     };
     let script = auth::TempFile::new(&app_tools_dir(&app)?, "ps1");
-    fs::write(&script.0, include_str!("../../scripts/Install-Deno.ps1")).map_err(|e| e.to_string())?;
+    fs::write(&script.0, if tool == "deno" { include_str!("../../scripts/Install-Deno.ps1") } else { include_str!("../../scripts/Install-FFmpeg.ps1") }).map_err(|e| e.to_string())?;
     let mut command = Command::new("powershell.exe");
     command.args(["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File"]).arg(&script.0).env_remove("PSModulePath").stdout(Stdio::piped()).stderr(Stdio::piped()).kill_on_drop(true);
     #[cfg(windows)] command.creation_flags(windows_sys::Win32::System::Threading::CREATE_NO_WINDOW);
     let mut child = command.spawn().map_err(|e| e.to_string())?;
     let stdout = child.stdout.take().ok_or("Missing installer output")?;
     let stderr = child.stderr.take().ok_or("Missing installer output")?;
-    let out = tauri::async_runtime::spawn(stream_output(stdout, app.clone(), "deno-install".into(), "stdout"));
-    let err = tauri::async_runtime::spawn(stream_output(stderr, app, "deno-install".into(), "stderr"));
+    let out = tauri::async_runtime::spawn(stream_output(stdout, app.clone(), format!("{tool}-install"), "stdout"));
+    let err = tauri::async_runtime::spawn(stream_output(stderr, app, format!("{tool}-install"), "stderr"));
     let status = child.wait().await.map_err(|e| e.to_string())?;
     let _ = out.await; let _ = err.await;
-    if status.success() { runtime::refresh_environment()?; }
+    if status.success() && tool == "deno" { runtime::refresh_environment()?; }
     drop(guard); drop(script);
-    Ok(UtilityResponse { stdout: String::new(), stderr: if status.success() { String::new() } else { "deno_install_failed".into() }, success: status.success() })
+    Ok(UtilityResponse { stdout: String::new(), stderr: if status.success() { String::new() } else { format!("{tool}_install_failed") }, success: status.success() })
 }
 
 pub fn run() {
@@ -950,6 +973,7 @@ pub fn run() {
             sync_cookies,
             clear_cookies,
             install_deno,
+            install_ffmpeg,
             updater::app_update_info,
             updater::check_app_update,
             updater::download_app_update,
@@ -997,6 +1021,31 @@ mod tests {
         assert!(managed_cookies_needed(&request, &[]));
         for flag in ["--cookies=x", "--cookies-from-browser", "--no-cookies", "--no-cookies-from-browser"] { assert!(!managed_cookies_needed(&request, &[flag.into()])); }
         request.urls = vec!["https://example.test".into()]; assert!(!managed_cookies_needed(&request, &[]));
+    }
+
+    #[test]
+    fn ffmpeg_arguments_preserve_paths_and_explicit_overrides() {
+        let directory = tempfile::tempdir().unwrap();
+        let bin = directory.path().join("Tools with spaces");
+        fs::create_dir(&bin).unwrap();
+        fs::write(bin.join("ffmpeg.exe"), b"fixture").unwrap();
+        assert!(detect_ffmpeg(Some(bin.to_str().unwrap())).is_none());
+        fs::write(bin.join("ffprobe.exe"), b"fixture").unwrap();
+        assert_eq!(detect_ffmpeg(Some(bin.to_str().unwrap())), Some(bin.clone()));
+        let mut request = video_request();
+        request.preset = "mp3".into();
+        request.ffmpeg_directory = Some(bin.to_string_lossy().into_owned());
+        let args = build_download_args(&request).unwrap();
+        let index = args.iter().position(|a| a == "--ffmpeg-location").unwrap();
+        assert_eq!(args[index + 1], bin.to_string_lossy());
+        assert!(index < args.iter().position(|a| a == "--").unwrap());
+        request.raw_args = "--ffmpeg-location=custom".into();
+        let args = build_download_args(&request).unwrap();
+        assert!(!args.contains(&"--ffmpeg-location".into()));
+        assert!(args.contains(&"--ffmpeg-location=custom".into()));
+        let mut utility = vec!["--ffmpeg-location".into(), "custom".into()];
+        add_ffmpeg(&mut utility, Some(bin.to_str().unwrap()));
+        assert_eq!(utility, vec!["--ffmpeg-location", "custom"]);
     }
 
     #[test]
@@ -1059,7 +1108,9 @@ mod tests {
 
     #[test]
     fn builds_download_arguments_in_stable_order() {
-        let args = build_download_args(&video_request()).unwrap();
+        let mut request = video_request();
+        request.ffmpeg_directory = Some(r"C:\Tools with spaces\FFmpeg".into());
+        let args = build_download_args(&request).unwrap();
         assert_eq!(
             args,
             vec![
@@ -1070,6 +1121,8 @@ mod tests {
                 "--no-playlist",
                 "--proxy",
                 "http://localhost:8080",
+                "--ffmpeg-location",
+                r"C:\Tools with spaces\FFmpeg",
                 "--",
                 "https://example.test/video"
             ]
