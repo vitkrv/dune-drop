@@ -142,3 +142,5 @@ select:focus-visible, button:focus-visible { outline: 2px solid #cfb786; outline
 .recovery-panel .retry-prominent { background: #cfb786; color: #26221c; font-weight: 700; }
 .queue-item:has(.recovery-panel) { align-items: flex-start; }
 .queue-item:has(.recovery-panel) .queue-dot { margin-top: 5px; flex-shrink: 0; }
+.app-updates progress { display: block; width: 100%; margin: 12px 0; }
+.app-release-notes { white-space: pre-wrap; overflow-wrap: anywhere; max-height: 220px; overflow: auto; font: inherit; }

@@ -28,6 +28,7 @@ import {
 } from "lucide-react";
 import { translator, type TranslationKey } from "./i18n";
 import { CookieControls, CookieContext, RecoveryPanel } from "./CookieControls";
+import { AppUpdates } from "./AppUpdates";
 import { hasCookieOverride, markCookiesRefreshed } from "./recovery";
 import { appendTerminalLogChunk, EMPTY_LOG_STATE, type LogState } from "./logs";
 import { DEFAULT_SETTINGS, loadSettings, saveSettings } from "./settings";
@@ -103,6 +104,9 @@ export default function App() {
   const [cookieError, setCookieError] = useState("");
   const [cookieFocus, setCookieFocus] = useState(0);
   const [denoBusy, setDenoBusy] = useState(false);
+  const [applyingUpdate, setApplyingUpdate] = useState(false);
+  const shellRef = useRef<HTMLElement>(null);
+  useEffect(() => { shellRef.current?.toggleAttribute("inert", applyingUpdate); }, [applyingUpdate]);
   const [toolRevision, setToolRevision] = useState(0);
   const initializedFfmpegDirectory = useRef<string>();
   const [toolInfo, setToolInfo] = useState<ToolInfo>();
@@ -120,7 +124,7 @@ export default function App() {
   const t = useMemo(() => translator(settings.language), [settings.language]);
   const errorText = useCallback((error: unknown) => {
     const code = String(error);
-    return /^(cookie_(profile_missing|extract_failed|invalid_export|no_youtube|sync_required|sync_busy|storage_failed)|deno_install_busy|deno_refresh_failed)$/.test(code) ? t(code as TranslationKey) : code;
+    return /^(cookie_(profile_missing|extract_failed|invalid_export|no_youtube|sync_required|sync_busy|storage_failed)|deno_install_busy|deno_refresh_failed|appUpdateBusy)$/.test(code) ? t(code as TranslationKey) : code;
   }, [t]);
 
   const appendLogs = useCallback((chunk: string) => {
@@ -199,6 +203,12 @@ export default function App() {
   }, [settings, settingsLoaded]);
 
   useEffect(() => {
+    if (!starting && settingsLoaded && toolInfo) {
+      void invoke("acknowledge_app_update").catch(() => setNotice(t("appUpdateRecovery")));
+    }
+  }, [starting, settingsLoaded, toolInfo, t]);
+
+  useEffect(() => {
     let unlistenLog: (() => void) | undefined;
     let unlistenDone: (() => void) | undefined;
     void listen<DownloadLogEvent>("download-log", ({ payload }) => {
@@ -249,7 +259,7 @@ export default function App() {
   );
 
   useEffect(() => {
-    if (runningId || denoBusy) return;
+    if (runningId || denoBusy || applyingUpdate) return;
     const next = oldestPending(queue);
     if (!next) return;
     if (!next.destination) {
@@ -264,7 +274,7 @@ export default function App() {
         items.map((item) => (item.id === next.id ? { ...item, status: "failed", error: errorText(error), recoveryReason: String(error) === "cookie_sync_required" ? "cookiesMissing" : undefined } : item)),
       );
     });
-  }, [queue, requestFor, runningId, t, denoBusy, errorText]);
+  }, [queue, requestFor, runningId, t, denoBusy, applyingUpdate, errorText]);
 
   useEffect(() => {
     const sample: QueueItem = { id: "preview", url: splitUrls(urls)[0] || "https://www.youtube.com/watch?v=VIDEO_ID", destination: settings.destination, preset, status: "pending" };
@@ -337,6 +347,7 @@ export default function App() {
   }
 
   function enqueue() {
+    if (applyingUpdate) return;
     const submittedUrls = splitUrls(urls);
     if (!settings.destination) return setNotice(t("missingDestination"));
     if (!submittedUrls.length) return setNotice(t("missingUrl"));
@@ -361,6 +372,7 @@ export default function App() {
   }
 
   function retry(item: QueueItem) {
+    if (applyingUpdate) return;
     setQueue((items) => [{ ...item, id: makeId(), status: "pending", error: undefined, savedPaths: undefined, recoveryReason: undefined, cookiesRefreshed: false, recoveryError: undefined }, ...items]);
   }
 
@@ -464,7 +476,7 @@ export default function App() {
   }
 
   return (
-    <main className="app-shell">
+    <main className="app-shell" ref={shellRef} aria-busy={applyingUpdate}>
       <aside className="sidebar">
         <div className="brand">
           <img className="brand-mark" src="/dunedrop-icon.png" alt="" />
@@ -749,6 +761,8 @@ export default function App() {
 
         {tab === "settings" && (
           <div className="content settings-grid">
+            <AppUpdates t={t} queueLength={queue.length} maintenance={denoBusy || cookieBusy || Boolean(runningId)}
+              flushSettings={() => saveSettings(settings)} setApplying={setApplyingUpdate} />
             <CookieControls settings={settings} status={cookieStatus} profiles={profiles} busy={cookieBusy}
               error={cookieError} focus={cookieFocus} t={t} update={updateSettings}
               browse={() => void browseFirefoxProfile()} sync={() => void syncCookies()} clear={() => void clearCookies()} />

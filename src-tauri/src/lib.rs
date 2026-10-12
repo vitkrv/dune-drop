@@ -1,6 +1,7 @@
 use serde::{Deserialize, Serialize};
 mod auth;
 mod runtime;
+mod updater;
 use std::{
     env,
     fs,
@@ -875,6 +876,7 @@ async fn sync_cookies(app: AppHandle, manager: State<'_, ProcessManager>, profil
     let lock = Arc::clone(&manager.cookies);
     tauri::async_runtime::spawn_blocking(move || {
         let _lock = lock.try_lock().map_err(|_| "cookie_sync_busy")?;
+        if app.state::<ProcessManager>().maintenance.load(std::sync::atomic::Ordering::SeqCst) { return Err("appUpdateBusy".into()); }
         let dir = auth::private_dir(app_tools_dir(&app)?.parent().unwrap())?;
         auth::sync(&dir, &ensure_managed_ytdlp(&app)?, &profile)
     }).await.map_err(|e| e.to_string())?
@@ -885,6 +887,7 @@ async fn clear_cookies(app: AppHandle, manager: State<'_, ProcessManager>) -> Re
     let lock = Arc::clone(&manager.cookies);
     tauri::async_runtime::spawn_blocking(move || {
         let _lock = lock.try_lock().map_err(|_| "cookie_sync_busy")?;
+        if app.state::<ProcessManager>().maintenance.load(std::sync::atomic::Ordering::SeqCst) { return Err("appUpdateBusy".into()); }
         auth::clear(&app_tools_dir(&app)?.parent().unwrap().join("auth"))?;
         Ok(auth::CookieStatus::default())
     }).await.map_err(|e| e.to_string())?
@@ -919,6 +922,7 @@ async fn install_deno(app: AppHandle, manager: State<'_, ProcessManager>) -> Res
 }
 
 pub fn run() {
+    if updater::early_start() { return; }
     tauri::Builder::default()
         .setup(|app| {
             #[cfg(windows)]
@@ -929,6 +933,7 @@ pub fn run() {
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_store::Builder::default().build())
         .manage(ProcessManager::default())
+        .manage(updater::UpdateState::default())
         .invoke_handler(tauri::generate_handler![
             initialize,
             preview_download_args,
@@ -945,6 +950,13 @@ pub fn run() {
             sync_cookies,
             clear_cookies,
             install_deno,
+            updater::app_update_info,
+            updater::check_app_update,
+            updater::download_app_update,
+            updater::cancel_app_update,
+            updater::apply_app_update,
+            updater::save_app_update,
+            updater::acknowledge_app_update,
         ])
         .run(tauri::generate_context!())
         .expect("error while running DuneDrop");

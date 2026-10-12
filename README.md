@@ -35,14 +35,14 @@ The same installer can be run from this checkout:
 powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\Install-Deno.ps1
 ```
 
-## YouTube: налаштування українською
+## YouTube: setup summary
 
-1. Встановіть Firefox та увійдіть у YouTube у **звичайному вікні** з обліковим записом, який має доступ до відео. Chrome можна залишити відкритим.
-2. У Налаштуваннях увімкніть cookies Firefox для YouTube, виберіть профіль і натисніть **Синхронізувати cookies**. Для іншого профілю потрібна нова синхронізація.
-3. Якщо YouTube потребує авторизації або cookies застаріли, виконайте підказки в невдалому елементі черги. Після синхронізації натисніть **Повторити завантаження**. Автоматичної синхронізації та повторних спроб немає.
-4. Для приватного відео або контенту для учасників обліковий запис повинен мати доступ. Якщо задано розширені параметри cookies, вони мають пріоритет над cookies Firefox.
+1. Install Firefox and sign into YouTube in a **regular window** using an account that can access the video. Chrome can stay open.
+2. In Settings, enable Firefox cookies for YouTube, select a profile, and click **Resync cookies**. Selecting a different profile requires a new sync.
+3. If YouTube requires authorization or the cookies have expired, follow the instructions in the failed queue item. After syncing, click **Retry download**. Cookies are never synced automatically, and downloads are never retried automatically.
+4. Private videos and members-only content require an account with access. If advanced cookie options are specified, they take precedence over saved Firefox cookies.
 
-Для JavaScript натисніть **Встановити / оновити Deno** у Налаштуваннях. Інсталяція для поточного користувача не потребує адміністратора. Перед повідомленням про успіх DuneDrop автоматично оновлює `PATH` для наступних команд завантажувача. Окремо відкриті термінали потрібно відкрити заново. Хід інсталяції та помилки доступні в Журналі. Також оновлюйте yt-dlp через Налаштування.
+For JavaScript support, click **Install / Update Deno** in Settings. Installation is for the current user and does not require administrator rights. Before reporting success, DuneDrop automatically refreshes `PATH` for subsequent downloader commands. Separately opened terminals must be reopened. Installation progress and errors appear in Logs. Also keep yt-dlp updated through Settings.
 
 ## Install FFmpeg for MP3 downloads
 
@@ -59,6 +59,60 @@ In DuneDrop, open Settings and select this ffmpeg folder if automatic detection 
 ```text
 %LOCALAPPDATA%\FFmpeg
 ```
+
+## Update DuneDrop
+
+In Settings, **DuneDrop updates → Check for updates** checks the latest published stable GitHub release. Checks and downloads happen only on request. Review the version and notes, click **Download update**, then **Update and restart**. Finish downloads and remove **all** queue items first, including completed items: queue history is not retained across restart. Settings, downloaded media, cookies, yt-dlp, FFmpeg, and Deno are preserved. The existing **Update yt-dlp** action is separate.
+
+The app verifies a Minisign signature over the exact update metadata bytes and checks the executable against its signed SHA256 and size. Invalid, incomplete, unsupported-platform, and older updates are rejected. Downloads are staged in `%LOCALAPPDATA%\DuneDrop\updates` with current-user access. Cancelling deletes partial files; a blocked network read may take up to the network timeout before cancellation finishes.
+
+Installation needs write access to the app's folder and free space for staging and backup. If the folder is read-only, choose **Save updated executable elsewhere**, select a **new filename**, and open that file manually. Existing files are never overwritten by this fallback. The portable executable can be renamed and placed in a path containing spaces.
+
+A temporary helper replaces the executable only after DuneDrop exits. It keeps `<your-executable-name>.dunedrop-backup` next to the executable until the new app acknowledges startup. Failed replacement or startup restores the old version where possible. Startup acknowledgement detects launch failures, not every possible regression.
+
+### Recover an interrupted update
+
+Close every DuneDrop window and reopen the executable. An unfinished transaction is recovered rather than installed silently. A backup and transaction are retained if automatic recovery cannot safely finish. If the original executable is missing, or the app still cannot open:
+
+1. Close DuneDrop and ensure its temporary helper is no longer running in Task Manager.
+2. Find `<your-executable-name>.dunedrop-backup` beside the executable. Copy it to a separate safe location before changing anything, then restore it to the original executable name. Do not delete your only working copy.
+3. Preserve `%LOCALAPPDATA%\DuneDrop\updates` for diagnosis. After restoring a working executable and preserving the backup, rename this **updates folder only** to `updates-recovery-backup` so the stale transaction is no longer retried.
+4. Reopen DuneDrop and check for updates again. Do not remove the `auth` or `tools` folders.
+
+### Publisher setup — manual actions required once
+
+1. Confirm `vitkrv/dune-drop` and its release downloads are public. The updater does not embed an access token. Do not expose private source without reviewing it.
+2. Generate a password-protected signing key outside the repository, in a private folder that already exists. Run from the repository root; Rust/MSVC prerequisites apply:
+
+   ```powershell
+   cargo run --manifest-path src-tauri/Cargo.toml --example release_sign -- generate "$env:USERPROFILE\dunedrop-update.key"
+   ```
+
+   Enter and confirm a nonempty password at the hidden prompts. Securely back up the `.key`, `.pub`, and password. Losing the private key prevents signing updates accepted by existing builds. Never commit the private key or send it through chat.
+3. Copy **only the generated `.pub` contents** into `src-tauri/update-public-key.txt`. The committed `UNCONFIGURED` placeholder deliberately disables updates and prevents release publication. Include the public key in your reviewed implementation commit. Key rotation requires a separately planned migration; do not simply replace it for existing users.
+4. In GitHub **Settings → Secrets and variables → Actions**, add `DUNEDROP_SIGNING_PRIVATE_KEY` containing the complete encrypted `.key` file and `DUNEDROP_SIGNING_PASSWORD` containing its password. Secrets are used only in the signing step, never printed or passed on the command line.
+5. Enable Actions if necessary and allow the workflow's `contents: write` permission for draft releases. Review and merge the implementation before tagging. No paid update service or Windows publisher certificate is required; Windows Authenticode signing is separate from update authentication.
+
+### Publish each version — manual actions
+
+1. Edit `RELEASE_NOTES.md` with that version's notes. Choose a new stable semantic version and synchronize all manifests and lockfiles:
+
+   ```powershell
+   node scripts/release.mjs bump 1.1.0
+   ```
+
+2. Review and commit the changes, merge them into your release branch, then create and push the corresponding tag:
+
+   ```powershell
+   git tag v1.1.0
+   git push origin v1.1.0
+   ```
+
+3. GitHub Actions validates matching versions, runs frontend/Rust and offline cookie/installer checks, builds the portable app, signs metadata, and uploads `DuneDrop.exe`, `update.json`, and `update.json.minisig` to a **draft release**. Checks fail closed; no stale artifact is published. Draft releases are not offered by the updater. Workflow actions are pinned to commit SHAs.
+4. Download and smoke-test the draft executable on Windows 11. Verify Settings and downloader behavior, and test an update from the preceding updater-enabled version. Review all three assets and release notes, then **publish the draft as the latest stable release**. Do not edit signed metadata after signing.
+5. For the **first updater-enabled release**, manually replace the old executable once. Subsequent versions can update through Settings.
+
+The workflow deliberately leaves publication to you. This repository's automated native tests use disposable executable fixtures for replacement, startup acknowledgement, rollback, and cleanup, with sentinel files for unrelated state. They do not exercise a live GitHub download, a real WebView update between released versions, authenticated YouTube sessions, or online Deno installation. Run release-tooling checks locally with `node --test scripts/Test-Release.mjs`; they use temporary fixture manifests and leave the real versions unchanged.
 
 ## Prerequisites
 

@@ -1,5 +1,9 @@
 $ErrorActionPreference = "Stop"
 
+function Assert-NativeSuccess {
+    if ($LASTEXITCODE -ne 0) { throw "Native command failed with exit code $LASTEXITCODE. Build stopped." }
+}
+
 function Resolve-CommandPath {
     param([string]$Name, [string[]]$FallbackPaths, [string]$InstallHint)
 
@@ -57,12 +61,17 @@ try {
     & (Join-Path $root "scripts\generate-icon.ps1")
     if (Test-Path -LiteralPath (Join-Path $root "package-lock.json")) {
         & $npm ci
+        Assert-NativeSuccess
     } else {
         & $npm install
+        Assert-NativeSuccess
     }
     & $npm run test
+    Assert-NativeSuccess
     & $cargo test --manifest-path (Join-Path $root "src-tauri\Cargo.toml")
+    Assert-NativeSuccess
     & $npm run tauri -- build --no-bundle
+    Assert-NativeSuccess
 
     if (-not (Test-Path -LiteralPath $releaseExe -PathType Leaf)) {
         throw "Tauri build completed without creating $releaseExe"

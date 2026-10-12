@@ -1,0 +1,52 @@
+name: Portable release
+on:
+  push:
+    tags: ['v*']
+permissions:
+  contents: read
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+jobs:
+  release:
+    runs-on: windows-2022
+    permissions:
+      contents: write
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: '22'
+          cache: npm
+      - name: Validate stable release
+        run: node scripts/release.mjs check $env:GITHUB_REF_NAME
+      - name: Release tooling checks
+        run: node --test scripts/Test-Release.mjs
+      - name: Build and run frontend and Rust checks
+        run: powershell -NoProfile -ExecutionPolicy Bypass -File scripts/build.ps1
+      - name: Offline cookie checks
+        run: python scripts/Test-CookieExport.py
+      - name: Offline installer checks
+        run: powershell -NoProfile -ExecutionPolicy Bypass -File scripts/Test-DenoInstaller.ps1
+      - name: Build signing tool without access to signing secrets
+        run: cargo build --locked --manifest-path src-tauri/Cargo.toml --example release_sign
+      - name: Generate signed metadata
+        env:
+          DUNEDROP_SIGNING_PRIVATE_KEY: ${{ secrets.DUNEDROP_SIGNING_PRIVATE_KEY }}
+          DUNEDROP_SIGNING_PASSWORD: ${{ secrets.DUNEDROP_SIGNING_PASSWORD }}
+        run: |
+          node scripts/release.mjs metadata $env:GITHUB_REF_NAME
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          & src-tauri/target/debug/examples/release_sign.exe sign dist/update.json
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Create draft release for manual review
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create $env:GITHUB_REF_NAME dist/DuneDrop.exe dist/update.json dist/update.json.minisig --draft --title "DuneDrop $env:GITHUB_REF_NAME" --notes-file RELEASE_NOTES.md --verify-tag
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }

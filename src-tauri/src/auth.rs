@@ -123,7 +123,7 @@ pub fn sync(dir: &Path, executable: &Path, profile: &str) -> Result<CookieStatus
     Ok(status(dir))
 }
 
-fn atomic_replace(source: &Path, target: &Path) -> Result<(), String> {
+pub(crate) fn atomic_replace(source: &Path, target: &Path) -> Result<(), String> {
     #[cfg(windows)] {
         use std::os::windows::ffi::OsStrExt;
         use windows_sys::Win32::Storage::FileSystem::{MoveFileExW, MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH};

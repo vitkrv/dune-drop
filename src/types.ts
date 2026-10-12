@@ -1,4 +1,15 @@
 export type Language = "en" | "uk";
+export interface AppUpdateManifest {
+  schemaVersion: number;
+  version: string;
+  platform: string;
+  url: string;
+  size: number;
+  sha256: string;
+  notes: string;
+}
+export interface AppUpdateInfo { currentVersion: string; update?: AppUpdateManifest | null; recovery: boolean }
+export interface AppUpdateProgress { downloaded: number; total: number }
 export type Preset = "video" | "mp3";
 export type Tab = "main" | "queue" | "advanced" | "logs" | "settings";
 export type QueueStatus = "pending" | "running" | "completed" | "failed" | "cancelled";
