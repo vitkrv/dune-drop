@@ -1,1 +1,1 @@
-Test auto-updater 
+Add FFmpeg installer into the application.
